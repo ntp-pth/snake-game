@@ -1,2 +1,2 @@
 # snake-game
-snack game  built with c++
+snake game  built with c++
