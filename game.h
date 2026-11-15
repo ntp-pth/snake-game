@@ -14,8 +14,8 @@ struct Cell {
     bool operator!=(Cell b) const { return !(*this == b); }
 };
 inline bool inside(Cell c) { return c.x >= 0 && c.y >= 0 && c.x < size && c.y < size; }
-enum class Mode { Classic, Maze, Speed };
-enum class State { Playing, Paused, RoundClear, Lost, Complete };
+enum class Mode { Classic, Maze, Speed, WrapEdges, WrapCorners };
+enum class State { Ready, Playing, Paused, RoundClear, Lost, Complete, Lobby };
 struct Round {
     std::wstring name;
     int interval, target;
@@ -24,13 +24,16 @@ struct Round {
 struct ModeConfig {
     std::wstring name;
     std::vector<Round> rounds;
+    bool wrap = false;
 };
-inline const std::array<ModeConfig, 3>& configs() {
+inline const std::array<ModeConfig, 5>& configs() {
     static const auto data = [] {
-        std::array<ModeConfig, 3> c{{
+        std::array<ModeConfig, 5> c{{
             {L"Cổ điển", {{L"Đồng cỏ", 100, 0, {}}}},
             {L"Mê cung", {{L"Hai hàng rào", 120, 5, {}}, {L"Lối rẽ", 120, 6, {}}, {L"Đường zích zắc", 120, 7, {}}}},
-            {L"Tốc độ", {{L"Khởi động", 100, 5, {}}, {L"Tăng tốc", 80, 6, {}}, {L"Bứt phá", 60, 7, {}}}}
+            {L"Tốc độ", {{L"Khởi động", 100, 5, {}}, {L"Tăng tốc", 80, 6, {}}, {L"Bứt phá", 60, 7, {}}}},
+            {L"Xuyên biên", {{L"Bốn góc chắn", 100, 0, {}}}, true},
+            {L"Xuyên góc", {{L"Bốn góc mở", 100, 0, {}}}, true}
         }};
         auto line = [](Round& r, int x, int y, int dx, int dy, int n) {
             for (int i = 0; i < n; ++i) r.walls.push_back({x + dx*i, y + dy*i});
@@ -51,6 +54,12 @@ inline const std::array<ModeConfig, 3>& configs() {
         line(c[2].rounds[2], 3, 5, 1, 0, 5);
         line(c[2].rounds[2], 12, 14, 1, 0, 5);
         line(c[2].rounds[2], 15, 4, 0, 1, 4);
+        for (int y=0; y<size; ++y) for (int x=0; x<size; ++x) {
+            bool corner = (x<2 || x>=size-2) && (y<2 || y>=size-2);
+            if (corner) c[3].rounds[0].walls.push_back({x,y});
+            if ((x==0 || x==size-1 || y==0 || y==size-1) && !corner)
+                c[4].rounds[0].walls.push_back({x,y});
+        }
         return c;
     }();
     return data;
@@ -60,7 +69,7 @@ class Game {
     bool turned = false;
 public:
     Mode mode = Mode::Classic;
-    State state = State::Playing;
+    State state = State::Ready;
     int roundIndex = 0, score = 0, eaten = 0;
     std::deque<Cell> body;
     Cell direction{1, 0}, food{-1, -1};
@@ -72,12 +81,26 @@ public:
     void startRound() {
         body = {{10, 10}, {9, 10}, {8, 10}};
         direction = {1, 0}; turned = false; eaten = 0;
-        state = State::Playing;
+        state = State::Ready;
         spawnFood();
     }
     void restart(Mode next) { mode = next; roundIndex = 0; score = 0; startRound(); }
+    bool active() const { return state==State::Playing || state==State::Paused || state==State::RoundClear; }
+    void begin() {
+        if (state==State::Lost || state==State::Complete) restart(mode);
+        if (state==State::Ready) state=State::Playing;
+        else if (state==State::RoundClear) nextRound();
+    }
+    void pause() { if (state==State::Playing) state=State::Paused; }
+    void resume() { if (state==State::Paused) state=State::Playing; }
+    void leaveMode() { state=State::Lobby; }
+    Cell destination(Cell p, Cell d) const {
+        Cell next{p.x+d.x,p.y+d.y};
+        if (config().wrap) { next.x=(next.x+size)%size; next.y=(next.y+size)%size; }
+        return next;
+    }
     void nextRound() {
-        if (state == State::RoundClear) { ++roundIndex; startRound(); }
+        if (state == State::RoundClear) { ++roundIndex; startRound(); state=State::Playing; }
     }
     // Flood fill treats the current body as blocked; only reachable empty cells qualify.
     std::vector<Cell> foodCandidates() const {
@@ -86,7 +109,7 @@ public:
         seen[body.front().y][body.front().x] = true;
         for (std::size_t i = 0; i < queue.size(); ++i) {
             for (Cell d : {Cell{1,0}, Cell{-1,0}, Cell{0,1}, Cell{0,-1}}) {
-                Cell p{queue[i].x+d.x, queue[i].y+d.y};
+                Cell p=destination(queue[i],d);
                 if (!inside(p) || seen[p.y][p.x] || wall(p) || occupied(p)) continue;
                 seen[p.y][p.x] = true;
                 queue.push_back(p); result.push_back(p);
@@ -110,7 +133,7 @@ public:
     void tick() {
         if (state != State::Playing) return;
         turned = false;
-        Cell head{body.front().x+direction.x, body.front().y+direction.y};
+        Cell head=destination(body.front(),direction);
         bool eating = head == food;
         auto end = body.end();
         if (!eating) --end; // Moving into the departing tail is legal.
